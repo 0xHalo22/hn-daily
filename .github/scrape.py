@@ -14,6 +14,8 @@ import json
 import os
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,10 +33,26 @@ SNAPSHOT_DIR = ROOT / "snapshots"
 LATEST_FILE = ROOT / "latest.md"
 
 
-def fetch_json(url: str):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read().decode("utf-8"))
+def fetch_json(url: str, attempts: int = 4, base_backoff: float = 2.0):
+    """fetch a json url with retries.
+
+    HN's firebase API is reliable but the daily cron makes ~31 requests in a
+    row; one transient blip should not fail the whole run. retry up to N
+    times with exponential backoff."""
+    last_err: Exception | None = None
+    backoff = base_backoff
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as e:
+            last_err = e
+            if attempt < attempts:
+                print(f"    fetch attempt {attempt}/{attempts} failed ({type(e).__name__}: {e}); retrying in {backoff:.1f}s")
+                time.sleep(backoff)
+                backoff *= 2
+    raise RuntimeError(f"fetch failed after {attempts} attempts: {last_err}") from last_err
 
 
 def fmt_item(rank: int, item: dict) -> str:
